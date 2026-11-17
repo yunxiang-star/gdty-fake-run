@@ -1,0 +1,28 @@
+# 个人配置与凭据（绝不提交）
+config.json
+token.txt
+token.old.txt
+token.fresh
+captured_params.json
+mitmca/
+flows*.mitm
+capture_dump.txt
+
+# 运行日志
+mitm_refresh.log
+mitm_refresh.err.log
+daily_*.log
+run_*.log
+run_gui_*.log
+account_switch.log
+points_*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini

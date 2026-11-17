@@ -1,0 +1,15 @@
+{
+  "user_id": "",
+  "club_id": 0,
+  "appid": "wx2961574bbec73239",
+  "route_templates": ["route_1.json", "route_2.json", "route_3.json", "route_4.json", "route_5.json"],
+  "route_template": "route_template.json",
+  "min_record_m": 3000,
+  "wechat_applet_storage": "",
+  "target_m": 6500,
+  "base_pace": 230,
+  "pace_min": 210,
+  "pace_max": 250,
+  "device_info": "apple iPhone14,2 iOS 18.3.2 8.0.59 3.17.2 电量87",
+  "brand": "apple@@@iPhone14,2@@@iOS 18.3.2@@@8.0.59@@@3.17.2"
+}
