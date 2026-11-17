@@ -60,9 +60,12 @@ class StepReportingTests(unittest.TestCase):
 
             self.assertGreaterEqual(len(reports), 3)
             for report in reports:
-                self.assertEqual(report['cur_steps'], int(report['dur'] * forge.CADENCE))
+                self.assertGreater(report['cur_steps'], 0)
             total = int(re.search(r'步数(\d+)', output.getvalue()).group(1))
             self.assertEqual(sum(report['cur_steps'] for report in reports), total)
+            # 步幅应落在真人区间（不随配速突变），约 1.45~1.58m
+            stride = 500 / total
+            self.assertTrue(1.35 <= stride <= 1.65, stride)
 
 if __name__ == '__main__':
     unittest.main()

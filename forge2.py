@@ -27,7 +27,6 @@ TARGET_M = CFG.get("target_m", 3300)
 BASE_PACE = CFG.get("base_pace", 300)   # 秒/km
 PACE_MIN = CFG.get("pace_min", 280)     # 每公里最快秒数(下限)
 PACE_MAX = CFG.get("pace_max", 330)     # 每公里最慢秒数(上限)
-CADENCE = 2.62                          # 基准步频(步/秒)
 
 ROUTES = CFG.get("route_templates") or [CFG.get("route_template", "route_template.json")]
 ROUTES = [r for r in ROUTES if os.path.exists(os.path.join(DIR, r))] or ["route_template.json"]
@@ -55,6 +54,35 @@ def at_arc(poly, arcs, s):
 
 def pick_route():
     return random.choice(ROUTES)
+
+def route_turn(poly):
+    """累计转向：正值=逆时针，负值=顺时针。"""
+    turn = 0.0
+    for i in range(1, len(poly) - 1):
+        x1 = poly[i][1] - poly[i-1][1]
+        y1 = poly[i][0] - poly[i-1][0]
+        x2 = poly[i+1][1] - poly[i][1]
+        y2 = poly[i+1][0] - poly[i][0]
+        turn += math.atan2(x1*y2 - y1*x2, x1*x2 + y1*y2)
+    return turn
+
+_normal_turn = None
+
+def route_label(name, poly):
+    """反着常规方向（以 route_template 为基准）的路线加「（反向）」。"""
+    global _normal_turn
+    if _normal_turn is None:
+        base = CFG.get("route_template", "route_template.json")
+        if not os.path.exists(os.path.join(DIR, base)):
+            base = ROUTES[0]
+        try:
+            base_poly, _ = load_route(base)
+            _normal_turn = route_turn(base_poly)
+        except Exception:
+            _normal_turn = 0.0
+    if _normal_turn and route_turn(poly) * _normal_turn < 0:
+        return name + "（反向）"
+    return name
 
 def make_course(total, target_m):
     """两种模式: 全程单向+折返尾 / 随机起点往返"""
@@ -113,7 +141,7 @@ def dry():
         step_m = 1000.0/pace * dt
         s = w.step(step_m); la, lo = at_arc(poly, arcs, s); cum += step_m
         pts.append((la + random.gauss(0, 1.5)/111320, lo + random.gauss(0, 1.5)/85200))
-    print(f"路线: {name} ({total:.0f}m) | 模式: {desc} | {len(pts)}点 {cum:.0f}m")
+    print(f"路线: {route_label(name, poly)} ({total:.0f}m) | 模式: {desc} | {len(pts)}点 {cum:.0f}m")
     la=[p[0] for p in pts]; lo=[p[1] for p in pts]
     print(f"坐标范围: lat {min(la):.5f}~{max(la):.5f} lon {min(lo):.5f}~{max(lo):.5f}")
 
@@ -125,14 +153,14 @@ def run():
     poly, arcs = load_route(name)
     total = arcs[-1]
     course, desc = make_course(total, TARGET_M)
-    print(f"[*] 路线: {name} ({total:.0f}m) | 模式: {desc}", flush=True)
+    print(f"[*] 路线: {route_label(name, poly)} ({total:.0f}m) | 模式: {desc}", flush=True)
     run_pace = BASE_PACE + random.uniform(-6, 6)      # 每次整体配速微调
     pace_phase = random.uniform(0, 2*math.pi)
     pace_period = random.uniform(150, 210)
     slow_period = random.uniform(780, 1020)
     slow_offset = random.uniform(0, slow_period)
-    cadence = CADENCE * random.uniform(.97, 1.03)    # 每次步频微调
-    print(f"[*] 本场配速基准 {run_pace:.1f}s/km, 步频 {cadence*60:.1f}spm", flush=True)
+    stride = random.uniform(1.45, 1.58)               # 每场步幅(米/步)，步频随配速自然变化
+    print(f"[*] 本场配速基准 {run_pace:.1f}s/km, 步幅 {stride:.2f}m", flush=True)
     w = Walker(course)
     r = call("POST", "/v1/route/start_route", {"is_in_room": 0, "sports_type": 1, "location": "",
                                                "source": 2, "device_info": DEV})
@@ -140,7 +168,7 @@ def run():
     print("start ->", rid, flush=True)
     if not rid: return
     wall0 = time.time(); ts_cursor = wall0
-    cum = 0.0; i = 0; steps = 0; last_steps = 0.0
+    cum = 0.0; i = 0; steps = 0; last_steps = 0.0; steps_mark = 0.0
     pending = []; all_pts = []
     while cum < TARGET_M:
         sim = time.time() - wall0
@@ -164,7 +192,9 @@ def run():
             pending = []
         if sim - last_steps >= 45:
             d = sim - last_steps
-            step_delta = int(d * cadence * random.uniform(.94, 1.06))
+            d_dist = cum - steps_mark
+            step_delta = max(0, int(d_dist / (stride * random.uniform(.98, 1.02))))
+            steps_mark = cum
             steps += step_delta
             call("POST", "/v1/route/create_route_gyroscope_steps",
                  {"route_id": rid, "type": 6, "cur_steps": step_delta, "upload_time": int(time.time()), "dur": int(d)})
@@ -175,6 +205,14 @@ def run():
     pending.append(mkpoint(i, sim, la, lo, cum, 5, ts_cursor, 3.0))
     all_pts.extend(pending)
     print("final:", call("POST", "/v1/route/create_route_point", {"points": pending, "route_id": rid}), flush=True)
+    d = sim - last_steps
+    if d >= 3:
+        step_delta = max(0, int((cum - steps_mark) / (stride * random.uniform(.98, 1.02))))
+        if step_delta:
+            steps += step_delta
+            call("POST", "/v1/route/create_route_gyroscope_steps",
+                 {"route_id": rid, "type": 6, "cur_steps": step_delta,
+                  "upload_time": int(time.time()), "dur": int(d)})
     time.sleep(1.5)
     for attempt in range(3):
         comp = call("POST", "/v1/route/completes_route", {"is_delete": False, "route_id": rid, "device_info": DEV})
