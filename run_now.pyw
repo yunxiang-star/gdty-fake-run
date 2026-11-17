@@ -84,6 +84,32 @@ KM      = CFG.get("target_m", 3300) / 1000.0
 MINUTES = CFG.get("target_m", 3300) * CFG.get("base_pace", 300) / 60000.0
 CAP_M   = 6000
 
+DIST_MIN, DIST_MAX = 1.0, 6.5          # 可自由选择的里程范围(公里)
+PACE_MIN_S, PACE_MAX_S = 240, 600      # 可自由选择的配速范围(秒/公里, 即 4'00"~10'00")
+ROUTE_NAMES = ["路线 %d" % i for i in range(1, 11)]
+ROUTE_FILES = ["route_%d.json" % i for i in range(1, 11)]
+
+# 10 个方案预设: (名称, 路线文件, 公里, 秒/公里)
+PRESETS = [
+    ("方案 1 · 轻松跑 3 公里", "route_1.json", 3.0, 360),
+    ("方案 2 · 慢摇 2 公里", "route_2.json", 2.0, 420),
+    ("方案 3 · 4 公里匀速", "route_3.json", 4.0, 320),
+    ("方案 4 · 5 公里节奏跑", "route_4.json", 5.0, 300),
+    ("方案 5 · 6.5 公里耐力跑", "route_5.json", 6.5, 340),
+    ("方案 6 · 1 公里恢复走跑", "route_6.json", 1.0, 600),
+    ("方案 7 · 4.5 公里慢跑", "route_7.json", 4.5, 480),
+    ("方案 8 · 5.5 公里快速跑", "route_8.json", 5.5, 240),
+    ("方案 9 · 6 公里六分半", "route_9.json", 6.0, 390),
+    ("方案 10 · 3.5 公里九分配", "route_10.json", 3.5, 540),
+]
+PRESET_LABELS = [p[0] for p in PRESETS]
+COMBO_VALUES = PRESET_LABELS + ["自定义"]
+
+
+def fmt_pace(sec):
+    sec = int(round(sec))
+    return "%d'%02d\"" % (sec // 60, sec % 60)
+
 
 def _run(argv, timeout=None):
     return subprocess.run(
@@ -271,9 +297,9 @@ class UI:
         root.configure(bg="white")
 
         tk.Label(root, text="咕咚一键跑步", font=(FONT, 14, "bold"),
-                 bg="white", fg=BLACK).pack(fill="x", padx=24, pady=(18, 0))
-        tk.Label(root, text="双击一次，自动帮你完成今天的 %.1f 公里" % KM, font=(FONT, 9),
-                 bg="white", fg=GRAY).pack(fill="x", padx=24, pady=(2, 12))
+                 bg="white", fg=BLACK).pack(fill="x", padx=24, pady=(12, 0))
+        tk.Label(root, text="双击一次，自动跑完你选的路线、里程和配速", font=(FONT, 9),
+                 bg="white", fg=GRAY).pack(fill="x", padx=24, pady=(2, 8))
 
         card = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
         card.pack(fill="x", padx=24)
@@ -310,32 +336,39 @@ class UI:
         self.warn_lbl = tk.Label(card, text="", font=(FONT, 9), bg=CARD, fg=AMBER,
                                  anchor="w", justify="left", wraplength=WRAP)
 
+        self._syncing = False
+        self._build_plan_card(root, tk, ttk)
+
         self.big = tk.Label(root, text="准备中…", font=(FONT, 14, "bold"),
                             bg="white", fg=BLACK, justify="left",
                             anchor="w", wraplength=WRAP)
-        self.big.pack(fill="x", padx=24, pady=(14, 0))
+        self.big.pack(fill="x", padx=24, pady=(10, 0))
 
         steps = tk.Frame(root, bg="white")
-        steps.pack(fill="x", padx=24, pady=(14, 6))
+        steps.pack(fill="x", padx=24, pady=(8, 4))
         self.marks = []
+        self.step_labels = []
         for i, name in enumerate(self.STEPS):
             r = tk.Frame(steps, bg="white")
             r.pack(fill="x", pady=2)
             mark = tk.Label(r, text="　　", font=(FONT, 10, "bold"),
                             bg="white", fg=GRAY, width=7, anchor="w")
             mark.pack(side="left")
-            tk.Label(r, text=name, font=(FONT, 10), bg="white",
-                     fg=BLACK, anchor="w").pack(side="left")
+            lbl = tk.Label(r, text=name, font=(FONT, 10), bg="white",
+                           fg=BLACK, anchor="w")
+            lbl.pack(side="left")
             self.marks.append(mark)
+            self.step_labels.append(lbl)
+        self._on_preset()
 
         self.bar = ttk.Progressbar(root, mode="indeterminate")
-        self.bar.pack(fill="x", padx=24, pady=(12, 4))
+        self.bar.pack(fill="x", padx=24, pady=(8, 4))
         self.elapsed = tk.Label(root, text="", font=(FONT, 9), bg="white",
                                 fg=GRAY, anchor="w")
         self.elapsed.pack(fill="x", padx=24)
 
         btns = tk.Frame(root, bg="white")
-        btns.pack(fill="x", padx=24, pady=(12, 4))
+        btns.pack(fill="x", padx=24, pady=(8, 4))
         self.start_btn = tk.Button(btns, text="开始跑步", font=(FONT, 11, "bold"),
                                    bg=BLUE, fg="white", activebackground="#1e40af",
                                    activeforeground="white", relief="flat", bd=0,
@@ -356,7 +389,111 @@ class UI:
         self.log_shown = False
 
         tk.Label(root, text="小提示：跑的过程中请不要打开「企业咕咚」小程序",
-                 font=(FONT, 9), bg="white", fg=AMBER).pack(fill="x", padx=24, pady=(8, 14))
+                 font=(FONT, 9), bg="white", fg=AMBER).pack(fill="x", padx=24, pady=(6, 10))
+
+    # ---- 方案选择 ----
+    def _build_plan_card(self, root, tk, ttk):
+        self._syncing = True
+        plan = tk.Frame(root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+        plan.pack(fill="x", padx=24, pady=(10, 0))
+        grid = tk.Frame(plan, bg=CARD)
+        grid.pack(fill="x", padx=14, pady=(6, 4))
+        grid.columnconfigure(1, weight=1)
+
+        def lab(text):
+            return tk.Label(grid, text=text, font=(FONT, 9), bg=CARD, fg=GRAY,
+                            width=6, anchor="w")
+
+        lab("方案").grid(row=0, column=0, sticky="w")
+        self.preset_var = tk.StringVar(value=PRESET_LABELS[0])
+        self.preset_box = ttk.Combobox(grid, textvariable=self.preset_var,
+                                       values=COMBO_VALUES, state="readonly",
+                                       font=(FONT, 9), width=24)
+        self.preset_box.grid(row=0, column=1, sticky="w")
+        self.preset_box.bind("<<ComboboxSelected>>", lambda e: self._on_preset())
+        self.preview_lbl = tk.Label(grid, text="", font=(FONT, 9), bg=CARD, fg=BLACK,
+                                    anchor="w")
+        self.preview_lbl.grid(row=0, column=2, sticky="w", padx=(14, 0))
+
+        lab("路线").grid(row=1, column=0, sticky="w", pady=(5, 0))
+        self.route_var = tk.StringVar(value=ROUTE_NAMES[0])
+        self.route_box = ttk.Combobox(grid, textvariable=self.route_var,
+                                      values=ROUTE_NAMES, state="readonly",
+                                      font=(FONT, 9), width=24)
+        self.route_box.grid(row=1, column=1, sticky="w", pady=(5, 0))
+        self.route_box.bind("<<ComboboxSelected>>", lambda e: self._on_manual())
+
+        lab("距离").grid(row=2, column=0, sticky="w", pady=(5, 0))
+        self.dist_scale = ttk.Scale(grid, from_=DIST_MIN, to=DIST_MAX,
+                                    orient="horizontal", length=430,
+                                    command=lambda v: self._on_manual())
+        self.dist_scale.grid(row=2, column=1, sticky="w", pady=(5, 0))
+        self.dist_lbl = tk.Label(grid, text="", font=(FONT, 9), bg=CARD, fg=BLACK,
+                                 anchor="w", width=12)
+        self.dist_lbl.grid(row=2, column=2, sticky="w", padx=(14, 0))
+
+        lab("配速").grid(row=3, column=0, sticky="w", pady=(5, 0))
+        self.pace_scale = ttk.Scale(grid, from_=PACE_MIN_S, to=PACE_MAX_S,
+                                    orient="horizontal", length=430,
+                                    command=lambda v: self._on_manual())
+        self.pace_scale.grid(row=3, column=1, sticky="w", pady=(5, 0))
+        self.pace_lbl = tk.Label(grid, text="", font=(FONT, 9), bg=CARD, fg=BLACK,
+                                 anchor="w", width=12)
+        self.pace_lbl.grid(row=3, column=2, sticky="w", padx=(14, 0))
+
+        tk.Label(plan, text="选方案可一键套用；也能自己拖路线、距离、配速（低于 3 公里可能不算打卡）。",
+                 font=(FONT, 8), bg=CARD, fg=GRAY, anchor="w",
+                 justify="left", wraplength=WRAP).pack(fill="x", padx=14, pady=(0, 6))
+        self.plan_widgets = [self.preset_box, self.route_box,
+                             self.dist_scale, self.pace_scale]
+
+    def _current_plan(self):
+        name = self.route_var.get()
+        idx = ROUTE_NAMES.index(name) if name in ROUTE_NAMES else 0
+        return (ROUTE_FILES[idx],
+                round(float(self.dist_scale.get()), 1),
+                int(round(float(self.pace_scale.get()))))
+
+    @property
+    def target_m(self):
+        return int(round(self._current_plan()[1] * 1000))
+
+    @property
+    def pace(self):
+        return self._current_plan()[2]
+
+    def route_file(self):
+        return self._current_plan()[0]
+
+    def _sync_labels(self):
+        _, km, pace = self._current_plan()
+        self.preview_lbl.configure(text="%s · %s/公里 · 预计 %.0f 分钟" % (
+            self.route_var.get(), fmt_pace(pace), km * pace / 60.0))
+        self.dist_lbl.configure(text="%.1f 公里" % km)
+        self.pace_lbl.configure(text="%s/公里" % fmt_pace(pace))
+        self.step_labels[2].configure(text="上传这 %.1f 公里的跑步数据" % km)
+
+    def _on_preset(self):
+        if self.preset_var.get() != "自定义":
+            try:
+                idx = PRESET_LABELS.index(self.preset_var.get())
+            except ValueError:
+                idx = 0
+            _, route, km, pace = PRESETS[idx]
+            self._syncing = True
+            try:
+                self.route_var.set(ROUTE_NAMES[ROUTE_FILES.index(route)])
+                self.dist_scale.set(km)
+                self.pace_scale.set(pace)
+            finally:
+                self._syncing = False
+        self._sync_labels()
+
+    def _on_manual(self):
+        if self._syncing:
+            return
+        self.preset_var.set("自定义")
+        self._sync_labels()
 
     # ---- helpers ----
     def _act(self, name):
@@ -441,11 +578,17 @@ class UI:
                 self.warn_lbl.pack(fill="x", padx=14, pady=(0, 10))
         else:
             self.warn_lbl.pack_forget()
+        self._fit()
 
     def set_running(self, running):
         state = "disabled" if running else "normal"
         for b in (self.start_btn, self.change_btn, self.status_btn):
             b.configure(state=state)
+        for w in getattr(self, "plan_widgets", []):
+            if w in (getattr(self, "preset_box", None), getattr(self, "route_box", None)):
+                w.configure(state="disabled" if running else "readonly")
+            else:
+                w.configure(state=state)
 
     def progress_on(self):
         self.bar.start(12)
@@ -569,7 +712,11 @@ class GuideDialog:
             pass
 
 
-def run_flow(ui, root, finish):
+def run_flow(ui, root, finish, route_file, target_m, pace):
+    km = target_m / 1000.0
+    minutes = km * pace / 60.0
+    route_name = ("路线 %d" % (ROUTE_FILES.index(route_file) + 1)
+                  if route_file in ROUTE_FILES else route_file)
     log_path = os.path.join(REPO, "run_gui_%s.log" %
                             datetime.datetime.now().strftime("%Y%m%d_%H%M"))
 
@@ -640,9 +787,10 @@ def run_flow(ui, root, finish):
 
     # 3) 提交
     bg(ui.step, 2, "doing")
-    bg(ui.say, "正在跑，大约要 %.0f 分钟。\n这段时间请不要打开「企业咕咚」小程序。" % MINUTES, BLUE)
+    bg(ui.say, "正在跑 %s，%.1f 公里，大约要 %.0f 分钟。\n"
+               "这段时间请不要打开「企业咕咚」小程序。" % (route_name, km, minutes), BLUE)
     bg(ui.progress_on)
-    log("开始上传跑步数据")
+    log("开始上传跑步数据: %s %.1fkm %s/km" % (route_name, km, fmt_pace(pace)))
 
     t0 = time.time()
     keep_state = {"alive": True}
@@ -650,7 +798,7 @@ def run_flow(ui, root, finish):
     def tick():
         while keep_state["alive"]:
             used = int(time.time() - t0)
-            bg(ui.set_elapsed, "已跑 %02d:%02d（总共约 %.0f 分钟）" % (used // 60, used % 60, MINUTES))
+            bg(ui.set_elapsed, "已跑 %02d:%02d（总共约 %.0f 分钟）" % (used // 60, used % 60, minutes))
             time.sleep(5)
 
     threading.Thread(target=tick, daemon=True).start()
@@ -660,7 +808,7 @@ def run_flow(ui, root, finish):
     rid = None
     try:
         proc = subprocess.Popen(
-            [PY, "-u", "forge2.py"], cwd=REPO,
+            [PY, "-u", "forge2.py", "--route", route_file, "--target", str(target_m), "--pace", str(pace)], cwd=REPO,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace", env=CHILD_ENV, bufsize=1,
             creationflags=NO_WINDOW)
@@ -913,10 +1061,11 @@ def main():
         ui.set_running(True)
         for b in (ui.start_btn,):
             b.configure(text="正在跑…")
+        plan = (ui.route_file(), ui.target_m, ui.pace)
 
         def work():
             try:
-                run_flow(ui, root, finish)
+                run_flow(ui, root, finish, *plan)
             except Exception as e:
                 root.after(0, lambda: ui.say("出错了：%s" % e, RED))
             finally:

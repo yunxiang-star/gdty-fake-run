@@ -17,7 +17,8 @@ class StepReportingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             shutil.copyfile(SOURCE, root / 'forge2.py')
-            config = {'user_id': 'offline-user', 'brand': 'offline-brand', 'device_info': 'offline-device'}
+            config = {'user_id': 'offline-user', 'brand': 'offline-brand', 'device_info': 'offline-device',
+                      'pace_min': 200, 'pace_max': 400}
             (root / 'config.json').write_text(json.dumps(config), encoding='utf-8')
             (root / 'token.txt').write_text('offline-placeholder', encoding='utf-8')
             (root / 'route_template.json').write_text(json.dumps([[30.30, 120.08], [30.31, 120.08], [30.32, 120.08]]), encoding='utf-8')
@@ -45,7 +46,7 @@ class StepReportingTests(unittest.TestCase):
 
             with contextlib.ExitStack() as stack:
                 stack.enter_context(patch.object(forge, 'TARGET_M', 500))
-                stack.enter_context(patch.object(forge, 'BASE_PACE', 300))
+                stack.enter_context(patch.object(forge, 'BASE_PACE', 230))
                 stack.enter_context(patch.object(forge, 'call', side_effect=request))
                 stack.enter_context(patch.object(forge.time, 'time', side_effect=lambda: clock[0]))
                 stack.enter_context(patch.object(forge.time, 'sleep', side_effect=sleep))
@@ -63,9 +64,9 @@ class StepReportingTests(unittest.TestCase):
                 self.assertGreater(report['cur_steps'], 0)
             total = int(re.search(r'步数(\d+)', output.getvalue()).group(1))
             self.assertEqual(sum(report['cur_steps'] for report in reports), total)
-            # 步幅应落在真人区间（不随配速突变），约 1.45~1.58m
+            # 步幅应落在真人跑步区间（不随配速突变），约 1.45~1.65m
             stride = 500 / total
-            self.assertTrue(1.35 <= stride <= 1.65, stride)
+            self.assertTrue(1.40 <= stride <= 1.70, stride)
 
 if __name__ == '__main__':
     unittest.main()

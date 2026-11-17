@@ -2,7 +2,7 @@
   "user_id": "",
   "club_id": 0,
   "appid": "wx2961574bbec73239",
-  "route_templates": ["route_1.json", "route_2.json", "route_3.json", "route_4.json", "route_5.json"],
+  "route_templates": ["route_1.json", "route_2.json", "route_3.json", "route_4.json", "route_5.json", "route_6.json", "route_7.json", "route_8.json", "route_9.json", "route_10.json"],
   "route_template": "route_template.json",
   "min_record_m": 3000,
   "wechat_applet_storage": "",

@@ -129,8 +129,8 @@ def mkpoint(i, sim_s, lat, lon, cum, typ, ts, step_m):
             "to_start_distance": round(cum * .97, 1), "type": typ,
             "time_str": time.strftime("%m.%d %H:%M:%S", time.localtime(ts))}
 
-def dry():
-    name = pick_route()
+def dry(route_override=None):
+    name = route_override if route_override and os.path.exists(os.path.join(DIR, route_override)) else pick_route()
     poly, arcs = load_route(name)
     total = arcs[-1]
     course, desc = make_course(total, TARGET_M)
@@ -145,21 +145,23 @@ def dry():
     la=[p[0] for p in pts]; lo=[p[1] for p in pts]
     print(f"坐标范围: lat {min(la):.5f}~{max(la):.5f} lon {min(lo):.5f}~{max(lo):.5f}")
 
-def run():
+def run(route_override=None):
     if not TOKEN or not UID:
         print("[!] 还没有登录凭证：请先运行 run_now.pyw（或 refresh.ps1）抓取 token。", flush=True)
         return
-    name = pick_route()
+    name = route_override if route_override and os.path.exists(os.path.join(DIR, route_override)) else pick_route()
     poly, arcs = load_route(name)
     total = arcs[-1]
     course, desc = make_course(total, TARGET_M)
     print(f"[*] 路线: {route_label(name, poly)} ({total:.0f}m) | 模式: {desc}", flush=True)
-    run_pace = BASE_PACE + random.uniform(-6, 6)      # 每次整体配速微调
+    run_pace = max(PACE_MIN, min(PACE_MAX, BASE_PACE + random.uniform(-6, 6)))  # 每次整体配速微调
     pace_phase = random.uniform(0, 2*math.pi)
     pace_period = random.uniform(150, 210)
     slow_period = random.uniform(780, 1020)
     slow_offset = random.uniform(0, slow_period)
-    stride = random.uniform(1.45, 1.58)               # 每场步幅(米/步)，步频随配速自然变化
+    speed = 1000.0 / run_pace
+    # 步幅随速度自适应：快跑 ~1.5m，慢跑/走 ~0.8m；步频 = 速度 / 步幅
+    stride = max(0.75, min(1.58, 0.35 + 0.28 * speed)) * random.uniform(0.985, 1.015)
     print(f"[*] 本场配速基准 {run_pace:.1f}s/km, 步幅 {stride:.2f}m", flush=True)
     w = Walker(course)
     r = call("POST", "/v1/route/start_route", {"is_in_room": 0, "sports_type": 1, "location": "",
@@ -242,6 +244,42 @@ def run():
     else:
         print("[FAIL] 完成失败; 进行中的路线可用 completes_route is_delete=true 清理后重试", flush=True)
 
+def cli_opts():
+    opts = {"route": None, "target": None, "pace": None, "dry": False}
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--dry":
+            opts["dry"] = True
+        elif a in ("--route", "--target", "--pace") and i + 1 < len(args):
+            opts[a[2:]] = args[i + 1]
+            i += 1
+        i += 1
+    return opts
+
+
+def main():
+    global TARGET_M, BASE_PACE, PACE_MIN, PACE_MAX
+    opts = cli_opts()
+    if opts["target"]:
+        try:
+            TARGET_M = max(300, int(round(float(opts["target"]))))
+        except ValueError:
+            pass
+    if opts["pace"]:
+        try:
+            BASE_PACE = int(round(float(opts["pace"])))
+            # UI 里可自由选 4'00"~10'00"，围绕所选配速上下浮动，不再被默认上下限夹死
+            PACE_MIN = max(180, BASE_PACE - 20)
+            PACE_MAX = min(900, BASE_PACE + 20)
+        except ValueError:
+            pass
+    if opts["dry"]:
+        dry(opts["route"])
+    else:
+        run(opts["route"])
+
+
 if __name__ == "__main__":
-    if "--dry" in sys.argv: dry()
-    else: run()
+    main()
