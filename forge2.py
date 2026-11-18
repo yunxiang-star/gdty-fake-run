@@ -120,9 +120,32 @@ def call(method, path, body=None, extra=None):
         if raw[:2] == b"\x1f\x8b": raw = gzip.decompress(raw)
         return json.loads(raw) if raw else {}
 
+ELEV_BASE = 50.0     # 校区海拔约 50m
+ELEV_HILL = 11.8      # 6.5km 时的单段爬升（两段共 23.6m，服务端实测约 16m）
+
+
+def elevation_at(cum):
+    """按里程比例生成两段缓坡；6.5km 服务端约 16m，短距离按比例缩小。"""
+    hill = ELEV_HILL * (TARGET_M / 6500.0)
+    p = (cum / TARGET_M) % 1.0
+    if p < 0.25:
+        x = p / 0.25
+        h = hill * (0.5 - 0.5 * math.cos(math.pi * x))
+    elif p < 0.5:
+        x = (p - 0.25) / 0.25
+        h = hill * (0.5 + 0.5 * math.cos(math.pi * x))
+    elif p < 0.75:
+        x = (p - 0.5) / 0.25
+        h = hill * (0.5 - 0.5 * math.cos(math.pi * x))
+    else:
+        x = (p - 0.75) / 0.25
+        h = hill * (0.5 + 0.5 * math.cos(math.pi * x))
+    return ELEV_BASE + h + random.gauss(0, 0.01)
+
+
 def mkpoint(i, sim_s, lat, lon, cum, typ, ts, step_m):
     # 真实iPhone点位指纹——字段和取值域都经过服务端验证, 勿改
-    return {"distance": round(step_m, 1), "elevation": round(20 + math.sin(i/8) + random.gauss(0, .3), 1),
+    return {"distance": round(step_m, 1), "elevation": round(elevation_at(cum), 1),
             "latitude": round(lat, 7), "longitude": round(lon, 7),
             "v_accuracy": round(random.uniform(2.8, 3.3), 6), "h_accuracy": 0, "gyroscope": "",
             "time_stamp": int(ts * 1000), "to_start_dost_time": int(sim_s * 1000),
@@ -220,7 +243,12 @@ def run(route_override=None):
         comp = call("POST", "/v1/route/completes_route", {"is_delete": False, "route_id": rid, "device_info": DEV})
         print(f"complete#{attempt} ->", comp, flush=True)
         if comp.get("route_id") not in (0, None, ""):
-            print(f"[OK] 记录ID {comp['route_id']}, {i}点 {cum:.0f}m {sim/60:.1f}min 步数{steps}", flush=True)
+            elevs = [p["elevation"] for p in all_pts]
+            raw_climb = sum(max(0, elevs[k+1]-elevs[k]) for k in range(len(elevs)-1))
+            sm = [sum(elevs[max(0, k-2):k+3]) / len(elevs[max(0, k-2):k+3]) for k in range(len(elevs))]
+            smooth_climb = sum(max(0, sm[k+1]-sm[k]) for k in range(len(sm)-1))
+            print(f"[*] 海拔 {min(elevs):.1f}~{max(elevs):.1f}m 原始爬升 {raw_climb:.1f}m 平滑爬升 {smooth_climb:.1f}m", flush=True)
+            print(f"[OK] 记录ID {comp['route_id']}, {i}点 {cum:.0f}m {sim/60:.1f}min 步数{steps} 爬升{raw_climb:.0f}m", flush=True)
             points_path = os.path.join(tempfile.gettempdir(), f"points_{rid[:8]}.json")
             with open(points_path, "w") as f:
                 json.dump([{"latitude": p["latitude"], "longitude": p["longitude"]} for p in all_pts], f)
