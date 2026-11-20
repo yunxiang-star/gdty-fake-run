@@ -120,32 +120,87 @@ def call(method, path, body=None, extra=None):
         if raw[:2] == b"\x1f\x8b": raw = gzip.decompress(raw)
         return json.loads(raw) if raw else {}
 
-ELEV_BASE = 50.0     # 校区海拔约 50m
-ELEV_HILL = 11.8      # 6.5km 时的单段爬升（两段共 23.6m，服务端实测约 16m）
+ELEV_BASE = 50.0      # 校区海拔约 50m
+ELEV_SIGMA = 1.2      # 小起伏幅度（米）：只负责曲线细节，不能自己凑出 8m 假爬升
+ELEV_TAU = 60.0       # 回归平均的时间尺度（秒）：一两分钟就被拉回基准线
+ELEV_LIMIT = 2.0      # 小起伏硬上限（米）：保证始终在基准线附近
+ELEV_NOISE = 0.18     # 逐点噪声（米）：避免曲线太光滑、只剩最高最低两档
+ELEV_HILL_MIN = 10.0  # 单段缓坡的爬升下限（米）：服务端只统计 ≥8m 的爬升
+ELEV_HILL_MAX = 14.0  # 单段缓坡的爬升上限（米）
+ELEV_PROFILE = None   # (小起伏偏移, 上一个点位的时间, [(坡中心, 坡宽, 爬升高度), ...])
 
 
-def elevation_at(cum):
-    """按里程比例生成两段缓坡；6.5km 服务端约 16m，短距离按比例缩小。"""
-    hill = ELEV_HILL * (TARGET_M / 6500.0)
-    p = (cum / TARGET_M) % 1.0
-    if p < 0.25:
-        x = p / 0.25
-        h = hill * (0.5 - 0.5 * math.cos(math.pi * x))
-    elif p < 0.5:
-        x = (p - 0.25) / 0.25
-        h = hill * (0.5 + 0.5 * math.cos(math.pi * x))
-    elif p < 0.75:
-        x = (p - 0.5) / 0.25
-        h = hill * (0.5 - 0.5 * math.cos(math.pi * x))
-    else:
-        x = (p - 0.75) / 0.25
-        h = hill * (0.5 + 0.5 * math.cos(math.pi * x))
-    return ELEV_BASE + h + random.gauss(0, 0.01)
+def new_elevation_profile():
+    """按里程铺 1~3 段缓坡：每段爬升 10~14m、坡间回落到基准线。
+
+    服务端会把 8m 以内的小起伏当成 GPS 噪声直接丢掉，所以只有细碎波动
+    时累计爬升会显示 0；必须安排几段像样的上坡，坡间还要真的降下去，
+    这样每一段才会被单独计入。
+    """
+    global ELEV_PROFILE
+    target = max(float(TARGET_M), 1.0)
+    n = max(1, min(3, int(round(target / 2000.0))))
+    hills = []
+    for k in range(n):
+        # 均匀铺开再加一点随机偏移，避免每场都长得一模一样
+        center = (k + 0.5) / n + random.uniform(-0.06, 0.06) / n
+        center = max(0.10, min(0.90, center))
+        width = random.uniform(0.55, 0.85) / n
+        amp = random.uniform(ELEV_HILL_MIN, ELEV_HILL_MAX)
+        hills.append((center, width, amp))
+    ELEV_PROFILE = (0.0, None, hills)
+
+
+def elevation_at(cum, t):
+    """基准线 + 按里程的缓坡 + 按时间的小起伏；坡度平缓，看着像真实地形。"""
+    global ELEV_PROFILE
+    if ELEV_PROFILE is None:
+        new_elevation_profile()
+    off, last_t, hills = ELEV_PROFILE
+    if last_t is not None:
+        dt = max(0.0, t - last_t)
+        rho = math.exp(-dt / ELEV_TAU)
+        # 每一步都向 0 收敛一点，再叠一点随机扰动，所以不会越跑越偏
+        off = off * rho + random.gauss(0, ELEV_SIGMA * math.sqrt(max(0.0, 1 - rho * rho)))
+    # 软边界：超出上限就折返，避免随机游走整场停在高处或低处
+    if off > ELEV_LIMIT:
+        off = 2 * ELEV_LIMIT - off
+    elif off < -ELEV_LIMIT:
+        off = -2 * ELEV_LIMIT - off
+    off = max(-ELEV_LIMIT, min(ELEV_LIMIT, off))
+    # 缓坡用余弦包络：两端正好回到基准线，坡与坡之间自然形成谷底
+    p = cum / max(float(TARGET_M), 1.0)
+    hill = 0.0
+    for center, width, amp in hills:
+        x = (p - center) / (width * 0.5)
+        if -1.0 < x < 1.0:
+            hill += amp * 0.5 * (1.0 + math.cos(math.pi * x))
+    ELEV_PROFILE = (off, t, hills)
+    return ELEV_BASE + hill + off + random.gauss(0, ELEV_NOISE)
+
+
+def server_climb(elevs, threshold=8.0):
+    """按服务端的过滤规则估算累计爬升：回落 8m 以上才重新起算。
+
+    和平台一样忽略 8m 以内的小起伏，只统计像样的上坡；用来在日志里
+    提前确认这一场大概会显示多少爬升。
+    """
+    if not elevs:
+        return 0.0
+    anchor = elevs[0]
+    gain = 0.0
+    for v in elevs[1:]:
+        if v - anchor >= threshold:
+            gain += v - anchor
+            anchor = v
+        elif anchor - v >= threshold:
+            anchor = v
+    return gain
 
 
 def mkpoint(i, sim_s, lat, lon, cum, typ, ts, step_m):
     # 真实iPhone点位指纹——字段和取值域都经过服务端验证, 勿改
-    return {"distance": round(step_m, 1), "elevation": round(elevation_at(cum), 1),
+    return {"distance": round(step_m, 1), "elevation": round(elevation_at(cum, sim_s), 1),
             "latitude": round(lat, 7), "longitude": round(lon, 7),
             "v_accuracy": round(random.uniform(2.8, 3.3), 6), "h_accuracy": 0, "gyroscope": "",
             "time_stamp": int(ts * 1000), "to_start_dost_time": int(sim_s * 1000),
@@ -172,6 +227,7 @@ def run(route_override=None):
     if not TOKEN or not UID:
         print("[!] 还没有登录凭证：请先运行 run_now.pyw（或 refresh.ps1）抓取 token。", flush=True)
         return
+    new_elevation_profile()
     name = route_override if route_override and os.path.exists(os.path.join(DIR, route_override)) else pick_route()
     poly, arcs = load_route(name)
     total = arcs[-1]
@@ -247,8 +303,9 @@ def run(route_override=None):
             raw_climb = sum(max(0, elevs[k+1]-elevs[k]) for k in range(len(elevs)-1))
             sm = [sum(elevs[max(0, k-2):k+3]) / len(elevs[max(0, k-2):k+3]) for k in range(len(elevs))]
             smooth_climb = sum(max(0, sm[k+1]-sm[k]) for k in range(len(sm)-1))
-            print(f"[*] 海拔 {min(elevs):.1f}~{max(elevs):.1f}m 原始爬升 {raw_climb:.1f}m 平滑爬升 {smooth_climb:.1f}m", flush=True)
-            print(f"[OK] 记录ID {comp['route_id']}, {i}点 {cum:.0f}m {sim/60:.1f}min 步数{steps} 爬升{raw_climb:.0f}m", flush=True)
+            est_climb = server_climb(elevs)
+            print(f"[*] 海拔 {min(elevs):.1f}~{max(elevs):.1f}m 原始爬升 {raw_climb:.1f}m 平滑爬升 {smooth_climb:.1f}m 服务端预计 {est_climb:.0f}m", flush=True)
+            print(f"[OK] 记录ID {comp['route_id']}, {i}点 {cum:.0f}m {sim/60:.1f}min 步数{steps} 爬升{est_climb:.0f}m", flush=True)
             points_path = os.path.join(tempfile.gettempdir(), f"points_{rid[:8]}.json")
             with open(points_path, "w") as f:
                 json.dump([{"latitude": p["latitude"], "longitude": p["longitude"]} for p in all_pts], f)
